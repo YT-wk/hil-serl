@@ -1,4 +1,8 @@
 import time
+import os
+
+os.environ["MUJOCO_GL"] = "glfw"
+print(f"Using MUJOCO_GL={os.environ['MUJOCO_GL']} with 1 viewer")
 
 import mujoco
 import mujoco.viewer
@@ -32,8 +36,8 @@ def key_callback(keycode):
 
 env.reset()
 
-# Create the dual viewer
-dual_viewer = DualMujocoViewer(env.unwrapped.model, env.unwrapped.data)
+# Create the viewer. A single passive viewer is more stable on remote X11/noVNC.
+dual_viewer = DualMujocoViewer(env.unwrapped.model, env.unwrapped.data, num_viewers=1)
 
 with dual_viewer as viewer:
     start = time.time()

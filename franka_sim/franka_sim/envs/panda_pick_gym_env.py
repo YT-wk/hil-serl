@@ -93,6 +93,9 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
                         "gripper_pose": spaces.Box(
                             -1, 1, shape=(1,), dtype=np.float32
                         ),
+                        "block_pos": spaces.Box(
+                            -np.inf, np.inf, shape=(3,), dtype=np.float32
+                        ),
                     }
                 ),
             }
@@ -138,13 +141,6 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
             high=np.asarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
             dtype=np.float32,
         )
-
-        self._viewer = mujoco.Renderer(
-            self.model,
-            height=render_spec.height,
-            width=render_spec.width
-        )
-        self._viewer.render()
 
     def reset(
         self, seed=None, **kwargs
@@ -224,6 +220,13 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         return obs, rew, terminated, False, {"succeed": success}
 
     def render(self):
+        if self._viewer is None:
+            self._viewer = mujoco.Renderer(
+                self.model,
+                height=self._render_specs.height,
+                width=self._render_specs.width,
+            )
+
         rendered_frames = []
         for cam_id in self.camera_id:
             self._viewer.update_scene(self.data, camera=cam_id)
@@ -246,8 +249,8 @@ class PandaPickCubeGymEnv(MujocoGymEnv):
         tcp_angvel = self._data.sensor("2f85/pinch_angvel").data
         obs["state"]["tcp_vel"] = np.concatenate([tcp_vel, tcp_angvel]).astype(np.float32)
 
-        gripper_pose = np.array(
-            self._data.ctrl[self._gripper_ctrl_id] / 255, dtype=np.float32
+        gripper_pose = np.asarray(
+            [self._data.ctrl[self._gripper_ctrl_id] / 255], dtype=np.float32
         )
         obs["state"]["gripper_pose"] = gripper_pose
 

@@ -13,7 +13,6 @@ from franka_env.envs.relative_env import RelativeFrame
 from franka_env.envs.franka_env import DefaultEnvConfig
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 from serl_launcher.wrappers.chunking import ChunkingWrapper
-from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
 from experiments.ram_insertion.wrapper import RAMEnv
@@ -113,6 +112,8 @@ class TrainConfig(DefaultTrainingConfig):
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         if classifier:
+            from serl_launcher.networks.reward_classifier import load_classifier_func
+
             classifier = load_classifier_func(
                 key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),

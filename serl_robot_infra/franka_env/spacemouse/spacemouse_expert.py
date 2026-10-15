@@ -2,10 +2,22 @@ import time
 import multiprocessing
 import numpy as np
 import inputs
-from franka_env.spacemouse import pyspacemouse
 from typing import Tuple
 from dataclasses import dataclass
 from enum import Enum
+
+
+def _get_pyspacemouse():
+    try:
+        from franka_env.spacemouse import pyspacemouse
+    except ModuleNotFoundError as exc:
+        if exc.name != "easyhid":
+            raise
+        raise ModuleNotFoundError(
+            "easyhid is required for SpaceMouse control. "
+            "Install easyhid or choose --controller keyboard/xbox/ps5."
+        ) from exc
+    return pyspacemouse
 
 class SpaceMouseExpert:
     """
@@ -15,7 +27,8 @@ class SpaceMouseExpert:
     """
 
     def __init__(self):
-        pyspacemouse.open()
+        self.pyspacemouse = _get_pyspacemouse()
+        self.pyspacemouse.open()
 
         # Manager to handle shared state between processes
         self.manager = multiprocessing.Manager()
@@ -30,7 +43,7 @@ class SpaceMouseExpert:
 
     def _read_spacemouse(self):
         while True:
-            state = pyspacemouse.read_all()
+            state = self.pyspacemouse.read_all()
             action = [0.0] * 6
             buttons = [0, 0, 0, 0]
 
@@ -66,6 +79,7 @@ class SpaceMouseExpert:
 class ControllerType(Enum):
     PS5 = "ps5"
     XBOX = "xbox"
+    KEYBOARD = "keyboard"
 
 @dataclass
 class ControllerConfig:
@@ -133,6 +147,7 @@ class JoystickExpert:
         self.latest_data = self.manager.dict()
         self.latest_data["action"] = [0.0] * 6
         self.latest_data["buttons"] = [False, False]
+        self.latest_data["toggle"] = False
 
         # Start a process to continuously read Joystick state
         self.process = multiprocessing.Process(target=self._read_joystick)
@@ -143,6 +158,7 @@ class JoystickExpert:
     def _read_joystick(self):        
         action = [0.0] * 6
         buttons = [False, False]
+        toggle = False
         
         while True:
             try:
@@ -182,10 +198,13 @@ class JoystickExpert:
                         buttons[0] = bool(event.state)
                     elif event.code == 'BTN_TR':
                         buttons[1] = bool(event.state)
+                    elif event.code == 'BTN_START':
+                        toggle = bool(event.state)
 
                 # Update the shared state
                 self.latest_data["action"] = action
                 self.latest_data["buttons"] = buttons
+                self.latest_data["toggle"] = toggle
                 
             except inputs.UnpluggedError:
                 print("No controller found. Retrying...")
@@ -196,6 +215,10 @@ class JoystickExpert:
         action = self.latest_data["action"]
         buttons = self.latest_data["buttons"]
         return np.array(action), buttons
-    
+
+    def get_toggle(self) -> bool:
+        """Returns whether the gamepad Start button is currently pressed."""
+        return bool(self.latest_data["toggle"])
+
     def close(self):
         self.process.terminate()

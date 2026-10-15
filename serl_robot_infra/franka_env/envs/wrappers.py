@@ -7,7 +7,6 @@ import copy
 from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert, JoystickExpert, ControllerType
 import requests
 from scipy.spatial.transform import Rotation as R
-from franka_env.envs.franka_env import FrankaEnv
 from typing import List
 import inputs
 import threading
@@ -402,7 +401,14 @@ class DualGripperPenaltyWrapper(gym.RewardWrapper):
         return observation, reward, terminated, truncated, info
 
 class JoystickIntervention(gym.ActionWrapper):
-    def __init__(self, env, action_indices=None, controller_type=ControllerType.XBOX):
+    def __init__(
+        self,
+        env,
+        action_indices=None,
+        controller_type=ControllerType.XBOX,
+        latch_intervention=False,
+        intervention_toggle=False,
+    ):
         super().__init__(env)
 
         self.gripper_enabled = True
@@ -410,6 +416,10 @@ class JoystickIntervention(gym.ActionWrapper):
             self.gripper_enabled = False
 
         self.action_indices = action_indices
+        self.latch_intervention = latch_intervention
+        self.intervention_toggle = intervention_toggle
+        self.intervention_latched = False
+        self._toggle_pressed = False
 
         self.expert = JoystickExpert(controller_type=controller_type)
         self.left, self.right = False, False
@@ -422,6 +432,14 @@ class JoystickIntervention(gym.ActionWrapper):
         - action: joystick action if nonezero; else, policy action
         """
         deadzone = 0.03
+
+        if self.intervention_toggle:
+            toggle_pressed = self.expert.get_toggle()
+            if toggle_pressed and not self._toggle_pressed:
+                self.intervention_latched = not self.intervention_latched
+                mode = "intervention" if self.intervention_latched else "autonomous"
+                print(f"[joystick] switched to {mode} mode", flush=True)
+            self._toggle_pressed = toggle_pressed
 
         expert_a, buttons = self.expert.get_action()
         self.left, self.right = tuple(buttons)
@@ -448,8 +466,14 @@ class JoystickIntervention(gym.ActionWrapper):
             expert_a = filtred_expert_a
 
         if intervened:
+            if self.latch_intervention and not self.intervention_latched:
+                self.intervention_latched = True
+                print("[joystick] intervention latched until success", flush=True)
             return expert_a, True
-        
+
+        if self.intervention_latched:
+            return np.zeros_like(action), True
+
         return action, False
     
     def step(self, action):
@@ -457,12 +481,216 @@ class JoystickIntervention(gym.ActionWrapper):
         new_action, replaced = self.action(action)
         
         obs, rew, done, truncated, info = self.env.step(new_action)
+        if self.intervention_latched and info.get("succeed", False):
+            self.intervention_latched = False
+            print("[joystick] success; policy control resumed", flush=True)
         if replaced:
             info["intervene_action"] = new_action
         info["left"] = self.left
         info["right"] = self.right
         return obs, rew, done, truncated, info
+
+    def reset(self, **kwargs):
+        self.intervention_latched = False
+        self._toggle_pressed = False
+        return self.env.reset(**kwargs)
     
     def close(self):
         self.expert.close()
         super().close()
+
+
+class KeyboardIntervention(gym.ActionWrapper):
+    def __init__(
+        self,
+        env,
+        action_indices=None,
+        pos_speed=0.2,
+        gripper_speed=1.0,
+        key_timeout=0.25,
+        latch_intervention=False,
+        intervention_toggle=False,
+    ):
+        super().__init__(env)
+
+        self.gripper_enabled = self.action_space.shape != (6,)
+        self.action_indices = action_indices
+        self.latch_intervention = latch_intervention
+        self.intervention_toggle = intervention_toggle
+        self.intervention_latched = False
+        self.pos_speed = float(pos_speed)
+        self.gripper_speed = float(gripper_speed)
+        self.key_timeout = float(key_timeout)
+        self._pressed_keys = set()
+        self._active_until = {}
+        self._lock = threading.Lock()
+        self._listener = None
+        self._success_callback = None
+        self._camera_callback = None
+        self._gripper_closed = False
+        self._gripper_command = 0.0
+        self._gripper_command_until = 0.0
+        self._toggle_requested = False
+
+    def start_listening(self, success_callback=None, camera_callback=None):
+        if self._listener is not None:
+            return self._listener
+
+        try:
+            from pynput import keyboard
+        except ImportError as exc:
+            raise ImportError(
+                "Continuous keyboard control requires pynput and a working "
+                "desktop/X11 session. Run this from the noVNC/desktop terminal "
+                "with a valid DISPLAY, or use a gamepad controller."
+            ) from exc
+
+        self._success_callback = success_callback
+        self._camera_callback = camera_callback
+        self._listener = keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release,
+        )
+        self._listener.start()
+        return self._listener
+
+    def key_callback(self, keycode):
+        key = self._normalize_key(keycode)
+        if key is None:
+            return
+        if key in {"a", "d", "w", "s", "q", "z", "r", "f"}:
+            with self._lock:
+                self._active_until[key] = time.time() + self.key_timeout
+
+    def action(self, action: np.ndarray) -> np.ndarray:
+        if self.intervention_toggle:
+            with self._lock:
+                toggle_requested = self._toggle_requested
+                self._toggle_requested = False
+            if toggle_requested:
+                self.intervention_latched = not self.intervention_latched
+                mode = "intervention" if self.intervention_latched else "autonomous"
+                print(f"[keyboard] switched to {mode} mode", flush=True)
+
+        expert_a = np.zeros(self.action_space.shape, dtype=np.float32)
+        keys = self._active_keys()
+
+        if expert_a.shape[0] >= 3:
+            expert_a[0] = self.pos_speed * self._axis(keys, positive="w", negative="s")
+            expert_a[1] = self.pos_speed * self._axis(keys, positive="a", negative="d")
+            expert_a[2] = self.pos_speed * (
+                self._axis(keys, positive="q", negative="z")
+                + self._axis(keys, positive="r", negative="f")
+            )
+
+        if self.gripper_enabled and expert_a.shape[0] >= 7:
+            with self._lock:
+                if time.time() <= self._gripper_command_until:
+                    expert_a[6] = self.gripper_speed * self._gripper_command
+
+        if self.action_indices is not None:
+            filtered_expert_a = np.zeros_like(expert_a)
+            filtered_expert_a[self.action_indices] = expert_a[self.action_indices]
+            expert_a = filtered_expert_a
+
+        if np.linalg.norm(expert_a) > 0.001:
+            if self.latch_intervention and not self.intervention_latched:
+                self.intervention_latched = True
+                print("[keyboard] intervention latched until success", flush=True)
+            return expert_a, True
+
+        if self.intervention_latched:
+            return np.zeros_like(action), True
+
+        return action, False
+
+    def step(self, action):
+        new_action, replaced = self.action(action)
+
+        obs, rew, done, truncated, info = self.env.step(new_action)
+        if self.intervention_latched and info.get("succeed", False):
+            self.intervention_latched = False
+            print("[keyboard] success; policy control resumed", flush=True)
+        if replaced:
+            info["intervene_action"] = new_action
+        return obs, rew, done, truncated, info
+
+    def reset(self, **kwargs):
+        self.intervention_latched = False
+        with self._lock:
+            self._toggle_requested = False
+        return self.env.reset(**kwargs)
+
+    def close(self):
+        with self._lock:
+            self._pressed_keys.clear()
+            self._active_until.clear()
+            self._gripper_command = 0.0
+            self._gripper_command_until = 0.0
+            self._toggle_requested = False
+        if self._listener is not None:
+            self._listener.stop()
+            self._listener = None
+        super().close()
+
+    def _active_keys(self):
+        now = time.time()
+        with self._lock:
+            expired = [key for key, deadline in self._active_until.items() if deadline < now]
+            for key in expired:
+                del self._active_until[key]
+            return set(self._pressed_keys) | set(self._active_until)
+
+    def _on_press(self, key):
+        normalized = self._normalize_key(key)
+        if normalized is None:
+            return
+        if normalized in {"a", "d", "w", "s", "q", "z", "r", "f"}:
+            with self._lock:
+                self._pressed_keys.add(normalized)
+        elif normalized == "x":
+            with self._lock:
+                if normalized in self._pressed_keys:
+                    return
+                self._pressed_keys.add(normalized)
+                self._gripper_closed = not self._gripper_closed
+                self._gripper_command = 1.0 if self._gripper_closed else -1.0
+                self._gripper_command_until = time.time() + self.key_timeout
+                state = "closed" if self._gripper_closed else "open"
+            print(f"[keyboard] gripper={state}", flush=True)
+        elif normalized == "space" and self.intervention_toggle:
+            with self._lock:
+                if normalized in self._pressed_keys:
+                    return
+                self._pressed_keys.add(normalized)
+                self._toggle_requested = True
+        elif normalized == "enter" and self._success_callback is not None:
+            self._success_callback("keyboard")
+        elif normalized in {"[", "]"} and self._camera_callback is not None:
+            self._camera_callback(-1 if normalized == "[" else 1)
+
+    def _on_release(self, key):
+        normalized = self._normalize_key(key)
+        if normalized is None:
+            return
+        with self._lock:
+            self._pressed_keys.discard(normalized)
+
+    @staticmethod
+    def _axis(keys, positive, negative):
+        return float(positive in keys) - float(negative in keys)
+
+    @staticmethod
+    def _normalize_key(keycode):
+        if isinstance(keycode, str):
+            return keycode.lower()
+        name = getattr(keycode, "name", None)
+        if name is not None:
+            return name.lower()
+        char = getattr(keycode, "char", None)
+        if char is not None:
+            return char.lower()
+        try:
+            return chr(keycode).lower()
+        except (TypeError, ValueError):
+            return None

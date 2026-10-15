@@ -1,12 +1,19 @@
-from experiments.ram_insertion.config import TrainConfig as RAMInsertionTrainConfig
-from experiments.usb_pickup_insertion.config import TrainConfig as USBPickupInsertionTrainConfig
-from experiments.object_handover.config import TrainConfig as ObjectHandoverTrainConfig
-from experiments.egg_flip.config import TrainConfig as EggFlipTrainConfig
-from experiments.pick_cube_sim.config import TrainConfig as PickCubeSimTrainConfig
+from importlib import import_module
+
+
+class LazyTrainConfig:
+    def __init__(self, module_name: str):
+        self.module_name = module_name
+
+    def __call__(self):
+        module = import_module(self.module_name)
+        return module.TrainConfig()
+
+
 CONFIG_MAPPING = {
-                "ram_insertion": RAMInsertionTrainConfig,
-                "usb_pickup_insertion": USBPickupInsertionTrainConfig,
-                "object_handover": ObjectHandoverTrainConfig,
-                "egg_flip": EggFlipTrainConfig,
-                "pick_cube_sim": PickCubeSimTrainConfig,
-               }
+    "ram_insertion": LazyTrainConfig("experiments.ram_insertion.config"),
+    "usb_pickup_insertion": LazyTrainConfig("experiments.usb_pickup_insertion.config"),
+    "object_handover": LazyTrainConfig("experiments.object_handover.config"),
+    "egg_flip": LazyTrainConfig("experiments.egg_flip.config"),
+    "pick_cube_sim": LazyTrainConfig("experiments.pick_cube_sim.config"),
+}

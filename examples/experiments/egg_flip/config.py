@@ -10,7 +10,6 @@ from experiments.egg_flip.wrapper import (
 )
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 from serl_launcher.wrappers.chunking import ChunkingWrapper
-from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
 
@@ -44,6 +43,8 @@ class TrainConfig(DefaultTrainingConfig):
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         
         if classifier and self.classifier_keys is not None:
+            from serl_launcher.networks.reward_classifier import load_classifier_func
+
             classifier_func = load_classifier_func(
                 key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),
